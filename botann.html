@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>録音・再生ボタン</title>
+  <style>
+    body {
+      font-family: "Comic Sans MS", sans-serif;
+      background: #fff0f5;
+      text-align: center;
+      padding: 20px;
+    }
+    h1 {
+      color: #ff69b4;
+    }
+    .recorder {
+      display: inline-block;
+      background: #ffe4e1;
+      margin: 10px;
+      padding: 15px;
+      border-radius: 15px;
+      box-shadow: 0 5px 10px rgba(0,0,0,0.1);
+    }
+    button {
+      background-color: #ffb6c1;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 15px;
+      margin: 5px;
+      font-size: 16px;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+    button:hover {
+      background-color: #ff69b4;
+      color: white;
+    }
+    audio {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>録音・再生ボタン</h1>
+
+  <div id="recorders"></div>
+
+  <script>
+    const NUM_RECORDERS = 10;
+    let sharedStream = null;
+
+    async function initMicrophone() {
+      if (!sharedStream) {
+        sharedStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+      return sharedStream;
+    }
+
+    for (let i = 0; i < NUM_RECORDERS; i++) {
+      const container = document.createElement("div");
+      container.className = "recorder";
+
+      const title = document.createElement("h3");
+      title.textContent = `音 ${i + 1}`;
+
+      const startBtn = document.createElement("button");
+      startBtn.textContent = "録音";
+
+      const stopBtn = document.createElement("button");
+      stopBtn.textContent = "停止";
+      stopBtn.disabled = true;
+
+      const playBtn = document.createElement("button");
+      playBtn.textContent = "再生";
+      playBtn.disabled = true;
+
+      const audioEl = document.createElement("audio");
+      audioEl.controls = false;
+
+      container.appendChild(title);
+      container.appendChild(startBtn);
+      container.appendChild(stopBtn);
+      container.appendChild(playBtn);
+      container.appendChild(audioEl);
+      document.getElementById("recorders").appendChild(container);
+
+      let mediaRecorder;
+      let audioChunks = [];
+
+      startBtn.onclick = async () => {
+        const stream = await initMicrophone();
+        mediaRecorder = new MediaRecorder(stream);
+
+        mediaRecorder.ondataavailable = e => {
+          audioChunks.push(e.data);
+        };
+
+        mediaRecorder.onstop = async () => {
+          const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+          const arrayBuffer = await audioBlob.arrayBuffer();
+          const audioContext = new AudioContext();
+          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+          const threshold = 0.02;
+          const sampleRate = audioBuffer.sampleRate;
+          const channelData = audioBuffer.getChannelData(0);
+          let startIndex = 0;
+          for (let i = 0; i < channelData.length; i++) {
+            if (Math.abs(channelData[i]) > threshold) {
+              startIndex = i;
+              break;
+            }
+          }
+
+          const trimmedLength = channelData.length - startIndex;
+          const trimmedBuffer = audioContext.createBuffer(1, trimmedLength, sampleRate);
+          trimmedBuffer.copyToChannel(channelData.slice(startIndex), 0);
+
+          const offlineContext = new OfflineAudioContext(1, trimmedLength, sampleRate);
+          const source = offlineContext.createBufferSource();
+          source.buffer = trimmedBuffer;
+          source.connect(offlineContext.destination);
+          source.start();
+          const renderedBuffer = await offlineContext.startRendering();
+
+          const wavBlob = await bufferToWaveBlob(renderedBuffer);
+          const audioUrl = URL.createObjectURL(wavBlob);
+          audioEl.src = audioUrl;
+          playBtn.disabled = false;
+          audioChunks = [];
+        };
+
+        mediaRecorder.start();
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        playBtn.disabled = true;
+      };
+
+      stopBtn.onclick = () => {
+        mediaRecorder.stop();
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      };
+
+      playBtn.onclick = async () => {
+        const response = await fetch(audioEl.src);
+        const arrayBuffer = await response.arrayBuffer();
+        const audioContext = new AudioContext();
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+        source.start();
+      };
+    }
+
+    async function bufferToWaveBlob(buffer) {
+      const wav = encodeWAV(buffer);
+      return new Blob([wav], { type: 'audio/wav' });
+    }
+
+    function encodeWAV(audioBuffer) {
+      const numChannels = 1;
+      const sampleRate = audioBuffer.sampleRate;
+      const samples = audioBuffer.getChannelData(0);
+      const buffer = new ArrayBuffer(44 + samples.length * 2);
+      const view = new DataView(buffer);
+
+      function writeString(view, offset, string) {
+        for (let i = 0; i < string.length; i++) {
+          view.setUint8(offset + i, string.charCodeAt(i));
+        }
+      }
+
+      writeString(view, 0, 'RIFF');
+      view.setUint32(4, 36 + samples.length * 2, true);
+      writeString(view, 8, 'WAVE');
+      writeString(view, 12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, numChannels, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * numChannels * 2, true);
+      view.setUint16(32, numChannels * 2, true);
+      view.setUint16(34, 16, true);
+      writeString(view, 36, 'data');
+      view.setUint32(40, samples.length * 2, true);
+
+      let offset = 44;
+      for (let i = 0; i < samples.length; i++, offset += 2) {
+        const s = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+      }
+
+      return view;
+    }
+  </script>
+</body>
+</html>
